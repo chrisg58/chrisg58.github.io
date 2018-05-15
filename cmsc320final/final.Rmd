@@ -1,12 +1,241 @@
 ---
-title: "Final Project"
+title: "Final Project: Exploring the MovieLens dataset"
 author: "Chris Giessner"
 date: "May 18, 2018"
 output: html_document
 ---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+##Introduction
+
+I will be using the MovieLens dataset, including information about movies and user ratings. My code uses the csv files downloaded from <a href="https://grouplens.org/datasets/movielens/">their website</a>. For more information on the dataset, check out the readme <a href="http://files.grouplens.org/datasets/movielens/ml-latest-small-README.html">here</a>.
+
+
+First, we will load the necessary libraries: ```tidyverse```, ```ggplot2```, ```stringr```, ```lubridate```, and ```broom```.
+```{r libraries,message=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(stringr)
+library(lubridate)
+library(broom)
 ```
 
-###Hello
+Next, let's read the csv files and preview the dataframes of the movies, ratings, and tags files and show a preview of the data being read by looking at the first few rows using the ```head()``` function.
+```{r loaddata,message=FALSE}
+csv_file1 <- "movies.csv"
+csv_file2 <- "ratings.csv"
+csv_file3 <- "tags.csv"
+movies_df <- read_csv(csv_file1)
+ratings_df <- read_csv(csv_file2)
+tags_df <- read_csv(csv_file3)
+movies_df %>% head()
+ratings_df %>% head()
+tags_df %>% head()
+
+```
+Looking at our data, we have 3 data frames. The movies table stores a list of movies, their release year, their genre categorization(s), and a variable called ```movieId``` which is used to reference data in the other two frames. The ratings data frame has the same ```movieId```, as well as a ```userId```, ```rating```, and ```timestamp``` to show which user gave a movie what rating and when. The rating is on a scale of 0.5 to 5, with increments of 0.5. The tags data frame is identical to the ratings table, but instead of a rating it stores a tag that a user applied to the movie--a custom string.
+
+##Tidying the data
+Before we can do any exploratory data analysis, we must clean up the data frames and manipulate variables to make the data easier to analyze. Let's begin by tidying the movies dataframe, ```movies_df```. First, we will extract the release year of each movie from the parentheses in the ```title``` column using the ```mutate``` function in combination with the ```stringr``` package. Ex: extract $1995$ from "Heat (1995)". 
+
+To do this, we will use a regular expression ```\\(([0-9]{4})\\)```, which matches the parentheses on the outside, with a group for matching the 4 digits within. The ```str_match``` function returns a character matrix with the full match in the first column and the matching groups, in order, in the subsequent columns.
+```{r tidying}
+year_re <- "\\(([0-9]{4})\\)"
+movies_df <- movies_df %>%
+  mutate(year=str_match(title, year_re)[,2]) %>%
+  mutate(year=as.integer(year))
+movies_df
+```
+Before we continue, let's make sure that every movie had a valid title string with a year included.
+```{r checkyears}
+movies_df %>% filter(is.na(year))
+```
+These rows are either TV shows with a span of years associated with them rather than a single year, or just do not have a release year. Since this data is either not relevant or just hard to analyze compared to the rest of the data (and there are only 6 entries like this out of 9125), we will simply drop these entries.
+
+```{r dropyears}
+movies_df <- movies_df %>% filter(!is.na(year))
+```
+
+Next, let's use the same method as before to remove the year from the titles just so that the column references only one attribute, rather than two combined.
+
+```{r tidying2}
+movie_re <- "^(.+) \\([0-9]{4}\\)"
+
+movies_df <- movies_df %>%
+  mutate(title=str_match(title,movie_re)[,2])
+movies_df
+```
+Next, since a single string containing every genre of a film is hard to use and effectively analyze as data, we will instead create a column for each individual genre which is either ```TRUE``` or ```FALSE```, depending on if ```str_detect``` finds the genre name within the string of the ```genres``` column. This will help with the analysis later.
+```{r splitgenres}
+movies_df <- movies_df %>%
+  mutate(action=str_detect(genres, "Action"),
+         adventure=str_detect(genres, "Adventure"),
+         animation=str_detect(genres, "Animation"),
+         children=str_detect(genres, "Children"),
+         comedy=str_detect(genres, "Comedy"),
+         crime=str_detect(genres, "Crime"),
+         documentary=str_detect(genres, "Documentary"),
+         drama=str_detect(genres, "Drama"),
+         fantasy=str_detect(genres, "Fantasy"),
+         filmnoir=str_detect(genres, "Film-Noir"),
+         horror=str_detect(genres, "Horror"),
+         musical=str_detect(genres, "Musical"),
+         mystery=str_detect(genres, "Mystery"),
+         romance=str_detect(genres, "Romance"),
+         scifi=str_detect(genres, "Sci-Fi"),
+         thriller=str_detect(genres, "Thriller"),
+         war=str_detect(genres, "War"),
+         western=str_detect(genres, "Western"),
+         no_genre=str_detect(genres, "(no genres listed)")) %>%
+  select(-genres)
+movies_df
+```
+
+The ratings and tags tables need some alteration as well (although we will not be using the tags table in our current analysis). From the html description of the dataset: "Timestamps represent seconds since midnight Coordinated Universal Time (UTC) of January 1, 1970." (this is also known as UNIX Epoch time) So, we must convert the ```timestamp``` from seconds to Datetime objects. The ```lubridate``` package contains the function ```as_datetime``` which, combined with the variable ```lubridate::origin``` (the Epoch time origin), does this for us.
+
+```{r datefixing}
+ratings_df <- ratings_df %>%
+  mutate(time=as_datetime(timestamp, origin=lubridate::origin, tz="UTC")) %>%
+  select(-timestamp)
+ratings_df
+
+tags_df <- tags_df %>%
+  mutate(time=as_datetime(timestamp, origin=lubridate::origin, tz="UTC")) %>%
+  select(-timestamp)
+
+tags_df
+```
+
+Our next step will be to use the ratings from the ratings data frame and calculate an average score for each movie to store in the movies data frame. To do this, our first step will be to use the ```group_by``` and ```summarize``` functions on the ratings data. During this step, we will also count the number of user ratings for each movie and store it in a column called ```num_ratings```.
+
+```{r getavg}
+ratings_df_avg <- ratings_df %>%
+  group_by(movieId) %>%
+  summarize(average_rating=mean(rating), num_ratings=n())
+ratings_df_avg
+```
+Next, we will perform a join on ```movieId``` between the ```ratings_df_avg``` and ```movies_df``` tables so that the movies will have their average ratings associated with them. Let's use a ```left_join``` (also from the dplyr package) just in case there are movies without ratings. This will preserve all of the movies in the frame and leave the average_rating as ```NA``` if there is no rating with a matching ```movieId```.
+
+```{r joinavg}
+movies_df <- movies_df %>%
+  left_join(ratings_df_avg,by="movieId")
+```
+
+This allows us to take a look at the top rated films in our database. Let's display the 10 highest rated films of the whole database that at least 50 user ratings.
+
+```{r toprated}
+movies_df %>%
+  arrange(desc(average_rating)) %>%
+  filter(num_ratings >= 50) %>%
+  select(title, year, average_rating, num_ratings) %>%
+  slice(1:10)
+```
+To make sure that our data is fully tided, let's see if there are any films without user ratings, just for future reference. We will also create a new data frame that filters these movies out, since assigning an arbitrary average rating to a movie is inaccurate as there is no way to predict the perceived quality of a movie with no user ratings recorded.
+
+```{r checkna}
+movies_df %>% filter(is.na(average_rating))
+movies_df_ratings <- movies_df %>% filter(!is.na(average_rating))
+```
+
+##Exploratory Data Analysis
+
+Okay. Now that our data is tidied up, we are ready to do some analysis. Let's start with some basic plots to get an idea of what our data looks like. First, a simple scatterplot of year vs. average rating for the 'Animation` genre.
+```{r firstplot}
+movies_df_ratings %>%
+  filter(animation==TRUE) %>%
+  ggplot(aes(x=year,y=average_rating)) + geom_point() + geom_smooth(method="lm")
+```
+
+From this plot, we can see that in the database, there are many more animation films released past 1975, but the average ratings are much more spread out. Animation films released before 1975 have an average that hovers around 3.5/5, or 70%. There is a slight downward trend in the average over time, but generally the 3.5 score stays about the same despite the increased spread.
+
+Would this trend of a steady average over time hold true for different genres? For the sake of comparison, let's try the same plot but this time with the Comedy gemre, Thriller genre, and just a general plot of every film, no matter the genre.
+```{r secondplot}
+movies_df_ratings %>%
+  filter(comedy==TRUE) %>%
+  ggplot(aes(x=year,y=average_rating)) + geom_point() + geom_smooth(method="lm")
+movies_df_ratings %>%
+  filter(thriller==TRUE) %>%
+  ggplot(aes(x=year,y=average_rating)) + geom_point() + geom_smooth(method="lm")
+
+movies_df_ratings %>%
+  ggplot(aes(x=year,y=average_rating)) + geom_point() + geom_smooth(method="lm")
+```
+
+Based on these plots, average ratings of the Comedy and Thriller genres actually trend pretty clearly downward, as evidenced by the line of fit's negative slope. However, this also applies to 
+overall dataset, as shown in the third plot. So, the trends in the comedy and thriller genres are simply following suit with the overall trend - it is the animation genre that defies this trend by ignoring the influence of time. We can get further into this analysis of the interaction between years, genres, and ratings later on.
+
+Just to show what different kinds relationships we can look at to analyze movie ratings in this dataset, here is the average rating vs. the number of ratings 
+```{r thirdplot}
+movies_df_ratings %>%
+  ggplot(aes(x=average_rating,y=num_ratings)) + geom_point()
+
+```
+
+This plot shows that while many movies with high average ratings have a low number of ratings, the films with high numbers of ratings tend to have higher a higher average, showing that users of this site tend to not waste time watching movies with worse ratings, directing their attention to the more acclaimed films.
+
+
+```{r culttag}
+tags_df %>% 
+  filter(str_detect(tag,"cult|Cult")) %>%
+  inner_join(movies_df_ratings,by="movieId") %>%
+  select(title,average_rating)
+```
+
+##Machine Learning
+As hinted at above, let's start analyzing the relationship between ```average_rating```, year, and all of the different genres. First: let's do a simple relationship of just the rating and year. We will use a linear regression model with just the ```year``` predictor using the ```lm``` and ```tidy()``` functions of the ```broom``` library to create the model and look at its statistics.
+
+```{r machine1}
+year_fit <- lm(average_rating~year,data=movies_df_ratings)
+year_fit %>% tidy()
+```
+
+What is important to look at is the p-value (```p.value``` in the data frame produced by ```tidy()``` to make sure that the relationship is statistically significant. For this model, both $\beta_0$ (the intercept) and $\beta_1$ (the estimate for the year relationship) have an extremely small p-value, well below $\alpha = 0.05$, so the relationship is statistically significant. We see that the average rating for movies released in a certain year lowers by approximately $0.007465$ per year.
+
+As we saw in the plots above, however, some genres had different trends in terms of average ratings, so let's incorporate every genre into our model and see what happens.
+
+```{r machine2}
+genreyear_fit <- lm(average_rating~year+action+adventure+animation+children+comedy+crime+documentary+drama+fantasy+filmnoir+horror+musical+mystery+romance+scifi+thriller+war+western+no_genre, data=movies_df_ratings)
+
+genreyear_fit %>% tidy() %>% arrange(p.value)
+```
+
+Looking at the p-value of these estimates, many genres have a statistically significant relationship with the average rating of a film: drama, documentary, animation, horror, children's, action, no genre listed, mystery, and war all have ```p.value``` $< \alpha$ where $\alpha = 0.05$. For example, horror films tend to have an average rating 0.21 points lower than the the overall list of movies, while documentaries are rated 0.6 points higher on average.
+
+The remaining genres: adventure, musical, sci-fi, crime, western, comedy, romance, thriller, film-noir, and fantasy, do not have a p-value below the threshold. Let's leave these unimpactful genres out of the model.
+
+```{r newfit}
+genreyear_fit2 <- lm(average_rating~year+action+animation+children+documentary+drama+horror+mystery+war+no_genre, data=movies_df_ratings)
+```
+
+Now, let's determine if we have incorporated enough predictors to make a good linear model, or if there is more information we need (i.e. interaction terms between year and genres). To do this, we will use the ```augment``` function of the ```broom``` library to get the residuals, and plot these vs. year and fitted.
+
+```{r resids}
+genreyear_augment <- genreyear_fit2 %>% augment()
+genreyear_augment %>%
+  ggplot(aes(x=year, y=.resid)) +
+    geom_point() + geom_smooth(method="lm") +
+    labs(title="Residuals by year",
+         x = "year",
+         y = "residual")
+genreyear_augment %>%
+  ggplot(aes(x=.fitted, y=.resid)) +
+    geom_point() + geom_smooth(method="lm") +
+    labs(title="Residuals vs. fitted",
+         x = "fitted",
+         y = "residual")
+```
+
+As both of these plots show, there is no discernible relationship between residuals and either year or fitted values. The spread does not seem to change and the residuals are centered on 0, staying on that line across the whole of both plots. So, our linear model is a good fit and we do not need to add further predictors.
+
+Just to be sure, we will try adding interactions between year and all of the significant genres and see what happpens.
+
+```{r interactions}
+genreyear_interactions_fit <- lm(average_rating~year+action+adventure+animation+children+documentary+drama+horror+mystery+war+no_genre+year:action+year:adventure+year:animation+year:children+year:documentary+year:drama+year:horror+year:mystery+year:war+year:no_genre, data=movies_df_ratings)
+
+genreyear_interactions_fit %>% tidy() %>% arrange(p.value)
+```
+Looking at the p-values of this model, over half of the year:[genre name] predictors have a p-value higher than $0.05$, and even many of the regular genre predictors have had their p-values increased to the point of going over the acceptable threshold. So, apart from the few genres with significant year interaction relationships (drama, action, animation, mystery), the year:[genre name] predictors are unecessary and actually make the model less accurate.
+
+###What we learned
+From our linear model, we can see that average ratings of movies (using the ratings of a fixed userbase) have a clear relationship with the films' release years: on average, the more recent a movie is, the lower the rating will be. Additionally, some genres (drama, documentary, animation) have a strong positive influence on average ratings, others (horror, children's, action) have a strong negative influence on ratings, and still others (fantasy, thriller, sci-fi) have no statistically significant impact at all. A few select genres (drama, action, animation, mystery) even have a ratings to year relationship that slightly differs from the norm.
+
+Further analysis can be done by looking at number of ratings, trends among individual users, and searching for keywords in the ```tags_df``` dataframe, just to name a few examples. This tutorial can be used as a guideline when doing your own analyses on this dataset.
